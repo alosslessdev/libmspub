@@ -1,3 +1,9 @@
+> **Fork note.** This fork adds a dependency-free implementation of the
+> Microsoft Publisher 95/97/98 format, written from the published specification
+> [alosslessdev/mspub-file-format](https://github.com/alosslessdev/mspub-file-format).
+> See [README.spec.md](README.spec.md) for what it covers and
+> [docs/INTEGRATION.md](docs/INTEGRATION.md) for how it wires into the importer.
+
 libmspub is a library and a set of tools for reading and converting MS
 Publisher files.
 

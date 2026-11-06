@@ -44,6 +44,8 @@ libmspub_@MSPUB_MAJOR_VERSION@_@MSPUB_MINOR_VERSION@_la_SOURCES = \
 	MSPUBParser97.cpp \
 	MSPUBParser97.h \
 	MSPUBTypes.h \
+	spec/MSPUBSpec.cpp \
+	spec/MSPUBSpec.h \
 	Margins.h \
 	NumberingDelimiter.h \
 	NumberingType.h \
