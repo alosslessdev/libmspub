@@ -369,7 +369,9 @@ std::string jsonEscape(const std::string &s)
   return out;
 }
 
-bool isShapeMarker(uint16_t t) { return t <= 0x0008; }
+/* Markers 0x0000…0x000B are shape records; 0x000C…0x000E and 0x0010+ are
+   not (0x000F is the group record and 0x0016 a document-level record). */
+bool isShapeMarker(uint16_t t) { return t <= 0x000b; }
 
 } // namespace
 
@@ -485,24 +487,29 @@ Document parse(const std::vector<uint8_t> &file)
     doc.pages.push_back(page);
   }
 
-  /* Groups (§7): child list, +8 bytes in Publisher 98. */
-  std::map<uint16_t, std::vector<uint16_t> > groupChildren;
+  /* Groups (§7): geometry is the same block as a shape; the child list sits
+     at +0x18/+0x22 and moves by +8 for the Publisher 98 layout. */
   for (const Chunk &c : doc.chunks)
   {
-    if (c.type != 0x000f)
+    if (c.type != 0x000f || c.size < 0x16)
       continue;
     const uint8_t *base = &contents[c.offset];
-    if (c.size < 0x24)
-      continue;
-    const bool p98 = base[2] == 0x20;
+    const bool p98 = c.size >= 0x20 && base[2] == 0x20;
     const size_t cntOff = p98 ? 0x20 : 0x18;
     const size_t arrOff = p98 ? 0x2a : 0x22;
+    Group g;
+    g.id = c.id;
+    g.parent = c.parent;
+    g.rotationDeg = u16(base + 4) / 10.0;
+    g.left = s32(base + 6);
+    g.top = s32(base + 0x0a);
+    g.right = s32(base + 0x0e);
+    g.bottom = s32(base + 0x12);
     const uint16_t n = u16(base + cntOff);
-    std::vector<uint16_t> ids;
     if (arrOff + 2 * size_t(n) <= c.size)
       for (uint16_t i = 0; i < n; ++i)
-        ids.push_back(u16(base + arrOff + 2 * i));
-    groupChildren[c.id] = ids;
+        g.children.push_back(u16(base + arrOff + 2 * i));
+    doc.groups.push_back(g);
   }
 
   /* Shapes (§6): geometry at +0x04/+0x06 for every shape marker. */
@@ -520,6 +527,28 @@ Document parse(const std::vector<uint8_t> &file)
     s.top = s32(base + 0x0a);
     s.right = s32(base + 0x0e);
     s.bottom = s32(base + 0x12);
+
+    /* The draw-time fields are only mapped for the 95/97 record layout; the
+       descriptor byte B is the per-marker constant (chapter 06 §6.3).  The
+       Publisher 98 records carry B+8 and are deliberately left alone. */
+    const uint8_t b = c.size > 3 ? base[3] : 0;
+    const bool legacy = b == 0x5c || b == 0x60 || b == 0x74 || b == 0x3b ||
+                        b == 0x3e || b == 0x35 || b == 0x29;
+    if (legacy)
+    {
+      if (c.size >= 0x27)
+      {
+        s.lineWidthCode = base[0x22];
+        s.lineColorRef = u32(base + 0x23);
+      }
+      if (c.type == 0x0005 && c.size >= 0x32)
+        s.fillColorRef = u32(base + 0x2e);
+      if ((c.type == 0x0000 || c.type == 0x0001) && c.size >= 0x48)
+      {
+        const uint16_t textId = u16(base + 0x46);
+        s.textId = textId == 0xffff ? -1 : int(textId);
+      }
+    }
     doc.shapes.push_back(s);
   }
 
@@ -695,10 +724,34 @@ bool parseFile(const std::string &path, Document &out)
 
 bool decodeColorRef(uint32_t ref, uint8_t &r, uint8_t &g, uint8_t &b)
 {
+  /* Static Office palette at VA 0x00600060 (chapter 09 §9.2); the 56 entries
+     0x00…0x37 are plain COLORREFs, so R is the low byte. */
+  static const uint32_t table[56] =
+  {
+    0x00000000, 0x00ffffff, 0x000000ff, 0x0000ff00, 0x00ff0000, 0x0000ffff, 0x00ffff00, 0x00ff00ff,
+    0x00808080, 0x00c0c0c0, 0x00000080, 0x00008000, 0x00800000, 0x00008080, 0x00808000, 0x00800080,
+    0x003399ff, 0x00330033, 0x00990000, 0x00009900, 0x00009999, 0x000066cc, 0x00000099, 0x00cc99cc,
+    0x00ff6666, 0x0066ff66, 0x0066ffff, 0x0099ccff, 0x006666ff, 0x000099ff, 0x00ff6600, 0x0000ccff,
+    0x00330099, 0x00003366, 0x00424242, 0x006699ff, 0x00003399, 0x000066ff, 0x00003333, 0x0000cc99,
+    0x0099ffff, 0x00003300, 0x00669933, 0x00ccffcc, 0x00663300, 0x00cccc33, 0x00ffffcc, 0x00ff6633,
+    0x00ffcc00, 0x00ffcc99, 0x00993333, 0x00996666, 0x00663399, 0x00ff99cc, 0x00333333, 0x00969696
+  };
   const uint8_t tag = uint8_t((ref >> 24) & 0xFF);
   const unsigned top = tag >> 5;
-  if (top == 0)
-    return false; /* palette index: needs the default table */
+  if (top == 0 || top == 6)
+  {
+    /* Palette index (top 0), or the brightness-modified palette entry
+       (top 6, whose low word is also an index).  Resolve the index through
+       the static table; brightness modulation is not applied here. */
+    const uint32_t index = ref & 0xFFFF;
+    if (index >= 56)
+      return false;
+    const uint32_t entry = table[index];
+    r = uint8_t(entry & 0xFF);
+    g = uint8_t((entry >> 8) & 0xFF);
+    b = uint8_t((entry >> 16) & 0xFF);
+    return true;
+  }
   if (top == 1)
   {
     r = uint8_t(ref & 0xFF);
@@ -713,6 +766,8 @@ bool decodeColorRef(uint32_t ref, uint8_t &r, uint8_t &g, uint8_t &b)
     b = 0x73;
     return true;
   }
+  /* Derived colour spaces (tags 0b010 / 0b100) need tables the model does
+     not carry; report failure rather than inventing a colour. */
   return false;
 }
 
@@ -734,6 +789,7 @@ std::string toJson(const Document &doc)
   o << "  \"chunks\": " << doc.chunks.size() << ",\n";
   o << "  \"pages\": " << doc.pages.size() << ",\n";
   o << "  \"shapes\": " << doc.shapes.size() << ",\n";
+  o << "  \"groups\": " << doc.groups.size() << ",\n";
   o << "  \"images\": " << doc.images.size() << ",\n";
   o << "  \"objects\": " << doc.objects.size() << ",\n";
   o << "  \"objectStorages\": " << doc.objectStorages.size() << ",\n";

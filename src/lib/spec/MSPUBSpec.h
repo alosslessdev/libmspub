@@ -45,6 +45,24 @@ struct Shape
   uint16_t type = 0;
   double rotationDeg = 0.0;   // stored 1/10 degree, counter-clockwise
   int32_t left = 0, top = 0, right = 0, bottom = 0;  // EMU
+
+  // Publisher 95/97 draw-time fields (chapter 06 section 6.7).  These are
+  // only meaningful when the record uses the 95/97 descriptor gate; for the
+  // Publisher 98 layout the fields move and are left at their defaults.
+  int textId = -1;            // u16 at +0x46 (0xFFFF = no text), 0x0000/0x0001
+  uint8_t lineWidthCode = 0;  // u8 at +0x22
+  uint32_t lineColorRef = 0;  // u32 at +0x23
+  uint32_t fillColorRef = 0;  // u32 at +0x2E (0x0005 only)
+};
+
+/** A group record (chapter 07): z-ordered child chunk ids. */
+struct Group
+{
+  uint16_t id = 0;
+  uint16_t parent = 0;
+  double rotationDeg = 0.0;   // stored 1/10 degree, counter-clockwise
+  int32_t left = 0, top = 0, right = 0, bottom = 0;  // EMU
+  std::vector<uint16_t> children;
 };
 
 /** A page slot: type 0x0014, or 0x0041 in Publisher 98 (chapter 05). */
@@ -121,6 +139,7 @@ struct Document
   std::vector<Chunk> chunks;
   std::vector<Page> pages;
   std::vector<Shape> shapes;
+  std::vector<Group> groups;
   std::vector<Image> images;
   std::vector<Palette> palettes;
   std::vector<ObjectRef> objects;

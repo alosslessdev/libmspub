@@ -16,3 +16,18 @@ jobs:
       - name: Grammar compiles
         if: ${{ hashFiles('kaitai/mspub_contents.ksy') != '' }}
         run: echo "grammar lives in the specification repository"
+
+  build-libmspub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librevenge-dev libboost-dev libicu-dev \
+            zlib1g-dev autoconf automake libtool pkg-config g++
+      - name: Configure and build libmspub
+        run: |
+          ./autogen.sh
+          ./configure
+          make -j"$(nproc)"

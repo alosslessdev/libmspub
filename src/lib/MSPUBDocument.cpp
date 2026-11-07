@@ -10,12 +10,15 @@
 #include <libmspub/libmspub.h>
 
 #include <memory>
+#include <vector>
 
 #include "MSPUBCollector.h"
 #include "MSPUBParser.h"
 #include "MSPUBParser2k.h"
 #include "MSPUBParser97.h"
 #include "libmspub_utils.h"
+#include "spec/MSPUBFeed.h"
+#include "spec/MSPUBSpec.h"
 
 namespace libmspub
 {
@@ -41,7 +44,11 @@ MSPUBVersion getVersion(librevenge::RVNGInputStream *input)
     if (!contentsStream)
       return MSPUB_UNKNOWN_VERSION;
 
-    if (0xe8 != readU8(contentsStream.get()) || 0xac != readU8(contentsStream.get()))
+    const unsigned char magicLow = readU8(contentsStream.get());
+    const unsigned char magicHigh = readU8(contentsStream.get());
+    /* 0xACE8 is the modern magic; 0xACE7 is the legacy one.  Both are
+       accepted by the Publisher 95/97 loader (spec §02 §2.2). */
+    if ((0xe8 != magicLow && 0xe7 != magicLow) || 0xac != magicHigh)
       return MSPUB_UNKNOWN_VERSION;
 
     unsigned char magicVersionByte = readU8(contentsStream.get());
@@ -68,6 +75,23 @@ MSPUBVersion getVersion(librevenge::RVNGInputStream *input)
     return MSPUB_UNKNOWN_VERSION;
   }
 
+}
+
+bool readAll(librevenge::RVNGInputStream *input, std::vector<unsigned char> &out)
+{
+  if (!input)
+    return false;
+  out.clear();
+  input->seek(0, librevenge::RVNG_SEEK_SET);
+  while (!input->isEnd())
+  {
+    unsigned long count = 0;
+    const unsigned char *block = input->read(16384, count);
+    if (!block || count == 0)
+      break;
+    out.insert(out.end(), block, block + count);
+  }
+  return !out.empty();
 }
 
 } // anonymous namespace
@@ -130,6 +154,23 @@ PUBAPI bool MSPUBDocument::parse(librevenge::RVNGInputStream *input, librevenge:
     {
     case MSPUB_2K:
     {
+      /* Publisher 95/97 keep their text inside Contents and Publisher 98
+         uses the shifted records; the legacy parsers lose the former and
+         mis-read the latter.  Feed the from-specification model for those
+         documents and keep the 2000+ Quill path untouched. */
+      std::unique_ptr<librevenge::RVNGInputStream> contentsStream(
+        input->getSubStreamByName("Contents"));
+      std::vector<unsigned char> contentsBytes;
+      if (contentsStream && readAll(contentsStream.get(), contentsBytes))
+      {
+        mspub::spec::Document doc = mspub::spec::parse(contentsBytes);
+        if (doc.ok && (!doc.hasQuill || doc.headerTag == 616) &&
+            feedDocument(doc, collector))
+        {
+          return collector.go();
+        }
+      }
+
       std::unique_ptr<librevenge::RVNGInputStream> quillStream(input->getSubStreamByName("Quill/QuillSub/CONTENTS"));
       if (!quillStream)
         parser.reset(new MSPUBParser97(input, &collector));
