@@ -28,14 +28,13 @@ static void usage()
 
 int main(int argc, char **argv)
 {
-  bool json = true;
   bool quiet = false;
   std::string imageDir;
   std::vector<std::string> files;
   for (int i = 1; i < argc; ++i)
   {
     if (!std::strcmp(argv[i], "--json"))
-      json = true;
+      continue; // JSON is the default output format
     else if (!std::strcmp(argv[i], "--quiet"))
       quiet = true;
     else if (!std::strcmp(argv[i], "--dump-images") && i + 1 < argc)
