@@ -37,3 +37,4 @@ jobs:
         run: |
           ./src/conv/raw/pub2raw src/test/data/fdo59355-1.pub > /tmp/out.raw
           test -s /tmp/out.raw
+          head -60 /tmp/out.raw
