@@ -530,18 +530,26 @@ Document parse(const std::vector<uint8_t> &file)
 
     /* The draw-time fields sit at different offsets in the 95/97 and the
        Publisher 98 record layouts: the 98 writer inserts 8 bytes in
-       +0x1C … +0x2A (chapter 06 §6.3), so every field behind that insertion
-       moves by +8.  Which fields are present is still gated by the
-       per-marker descriptor byte B (chapter 06 §6.3). */
+       +0x1C … +0x2A (24 for the image-bearing 0x0002/0x0003; chapter 06
+       §6.3), so every field behind that insertion moves by the shift.
+       Which fields are present is still gated by the per-marker descriptor
+       byte B (chapter 06 §6.3).  +0x16 sits before the insertion and
+       +0x18 … +0x20 inside it, so those three keep their offsets. */
     const uint8_t b = c.size > 3 ? base[3] : 0;
     const bool legacy = b == 0x5c || b == 0x60 || b == 0x74 || b == 0x3b ||
                         b == 0x3e || b == 0x35 || b == 0x29;
     const bool p98 = doc.headerTag == 616;
-    const size_t shift = p98 ? 8 : 0;
+    const size_t shift = p98 ? (c.type == 0x0002 || c.type == 0x0003 ? 24 : 8) : 0;
     if (legacy || p98)
     {
       if (c.size >= 0x18)
         s.flags = u16(base + 0x16);
+      if (c.size >= 0x21)
+      {
+        s.colorRefA = u32(base + 0x18);
+        s.colorRefB = u32(base + 0x1c);
+        s.selector = base[0x20];
+      }
       if (c.size >= 0x27 + shift)
       {
         s.lineWidthCode = base[0x22 + shift];
@@ -563,15 +571,17 @@ Document parse(const std::vector<uint8_t> &file)
       }
     }
 
-    /* 0x0003 freeform outline: counted array of box-local {i32 x, i32 y}
-       vertices, count at +0x74, stride word (8) at +0x78, array at +0x7E
-       (chapter 06 §6.4).  Only the 95/97 layout is decoded; the Publisher 98
-       record grows by 24 bytes and its tail is not proven (§6.3). */
-    if (!p98 && c.type == 0x0003 && c.size >= 0x7e)
+    /* 0x0002/0x0003 freeform outline: counted array of box-local {i32 x,
+       i32 y} vertices; count pair at +0x74/+0x76, element-size word (8)
+       at +0x78, array at +0x7E (chapter 06 §6.4).  Only the 95/97 layout
+       is decoded; the Publisher 98 record grows by 24 bytes and its tail
+       is not proven (§6.3). */
+    if (!p98 && (c.type == 0x0002 || c.type == 0x0003) && c.size >= 0x7e)
     {
       const uint16_t n = u16(base + 0x74);
+      const uint16_t n2 = u16(base + 0x76);
       const uint16_t stride = u16(base + 0x78);
-      if (n > 0 && stride == 8 && c.size >= 0x7e + 8 * size_t(n))
+      if (n > 0 && n == n2 && stride == 8 && c.size >= 0x7e + 8 * size_t(n))
       {
         for (uint16_t k = 0; k < n; ++k)
         {

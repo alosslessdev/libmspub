@@ -92,34 +92,29 @@ autotools setup against librevenge, boost and ICU.
   `beginGroup`/`setCurrentGroupSeqNum`/`endGroup`; shapes with `setShapeType`,
   `setShapeCoordinatesInEmu`, `setShapeRotation` (the model's
   counter-clockwise tenths converted into the collector's screen-positive
-  angle), `setShapePage` and `setShapeOrder`.  A `0x0003` freeform outline is
-  emitted as a `DynamicCustomShape` (box-local EMU vertices, `NOT_PRIMITIVE`),
-  which makes the collector draw the polygon instead of its bounding box.
+  angle), `setShapePage` and `setShapeOrder`.  A `0x0002`/`0x0003` freeform
+  outline (count pair at `+0x74`, element size at `+0x78`, box-local EMU
+  vertices from `+0x7E`) is emitted as a `DynamicCustomShape` (box-local EMU
+  vertices, `NOT_PRIMITIVE`), which makes the collector draw the polygon
+  instead of its bounding rectangle.  Flag word bit 0 (`+0x16`) is emitted
+  as an offset shadow (fixed `(57150, 57150)` EMU down-right, pen colour
+  tinted 50 % toward white); no other flag bit is a flip, frame or mirror
+  control (chapter 06 §6.7.6), so only the shadow is emitted.
 * **Text** — Publisher 95/97: the character array split into `0x0C` frame
-  blocks; the block ordinal is assigned to the text-bearing `0x0000`/`0x0001`
-  shapes ordered by their `u16@+0x46` text id (the only shape-side link the
-  format carries, chapter 13).  A block whose `0x0F` cell count equals the
-  `A·B` of its `0x0001` frame is emitted as a real table: one paragraph per
-  cell, `setTableCellTextEnds` with the cumulative character offsets and
-  `setShapeTableInfo` with the row/column extents from the 14-byte records.
-  The format has no table record (chapter 10 §10.1) — the grid was always the
-  frame's `A`/`B` counts, so `TableInfo` expresses it exactly.  Publisher 98:
-  the Quill `TEXT` array (UTF-8 from the model, converted to UTF-16LE for the
-  collector), attached to the `0x0008` text frames.
-* **Encoding** — a pure-ASCII legacy pool is pinned to `windows-1252` with
-  `setTextEncoding`; pools with high bytes keep the collector's ICU detector,
-  because the format stores no code page (chapter 13 §13.14.1 measures CP1252
-  only over the English corpus).
-* **Images** — each `0x0021` payload is passed to `addImage(..., WMF, ...)`
-  and bound to its owner (`0x0002`/`0x0003`, or the shape that owns a `0x0027`
-  picture object).
-* **Palette** — the eight `0x0047` references are resolved through the colour
-  decoder (56-entry static table, literal RGB, automatic) and added with
-  `addPaletteColor`.
-* **Fill and line** — the model exposes the `+0x23` pen, the `+0x22` width
-  code and (95/97 only) the `+0x2E` fill; the feed emits
-  `addShapeLine`/`setShapeFill`.  For `headerTag == 616` the pen is read at
-  the documented `+8` shift (`+0x2A` width, `+0x2B` colour).
+  blocks.  The shape side of the link is the `u16@+0x46` text id: every
+  shape with text id *i* displays block *i*, and repeated ids share the
+  block (one story flowed across several frames).  Content shapes are
+  grouped by text id and the *k*-th group owns the *k*-th block; `0xFFFF`
+  records and the zero-box gallery defaults own no block (chapter 10
+  §10.3.1, chapter 13 §13.14).  A block whose `0x0F` cell count equals the
+  `A·B` of a sharing `0x0001` frame is emitted as a real table: one
+  paragraph per cell, `setTableCellTextEnds` with the cumulative character
+  offsets and `setShapeTableInfo` with the row/column extents from the
+  14-byte records.  The format has no table record (chapter 10 §10.1) —
+  the grid was always the frame's `A`/`B` counts, so `TableInfo` expresses
+  it exactly.  Publisher 98: the Quill `TEXT` array (UTF-8 from the model,
+  converted to UTF-16LE for the collector), attached to the `0x0008` text
+  frames.
 
 
 `docs/INTEGRATION.md` expands these with the exact offsets and the conditions
@@ -138,14 +133,15 @@ under which each applies.
   `+8`-shifted candidate (`+0x36`) holds one constant value in every record of
   the Publisher 98 corpus, which cannot be a per-shape fill, and chapter 06
   §6.9 still lists the inserted run as `[UNKNOWN]`. The line width (`+0x2A`)
-  and line colour (`+0x2B`) are read at the shifted offsets the chapter names.
+  and line colour (`+0x2B`) are read at the shifted offsets the chapter
+  names (the shift is 24 bytes for the image-bearing `0x0002`/`0x0003`).
 * Publisher 98's Quill stream does not persist a text-object → shape link
   (chapter 13 §13.16); when the block and frame counts differ the whole `TEXT`
   array is attached to the first `0x0008` frame.
-* The `0x0002` image-bearing shape's counted tail (chapter 06 §6.4) is not
-  decoded: only 2 of its 1 016 instances are longer than the fixed record and
-  the meaning of those 56 bytes is `[UNKNOWN]`. The `0x0003` tail is decoded
-  and emitted as a custom polygon path.
+* The `0x0002`/`0x0003` counted tails are decoded (count pair, element size
+  8, box-local vertices) and emitted as custom polygon paths, including for
+  image-bearing `0x0002` shapes, whose image fill still binds through the
+  owner index.
 * The freeform fill/line block (`+0x4E … +0x73` of `0x0003`) is undecoded in
   the specification, so polygons render only when the shared `+0x22`/`+0x23`
   line fields are set.

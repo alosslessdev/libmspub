@@ -28,6 +28,7 @@
 #include "../MSPUBCollector.h"
 #include "../MSPUBTypes.h"
 #include "../PolygonUtils.h"
+#include "../Shadow.h"
 #include "../ShapeType.h"
 #include "../TableInfo.h"
 
@@ -366,12 +367,12 @@ private:
       return;
 
     /* The pool carries no code page.  Chapter 13 §13.14.1 measures CP1252
-       for the corpus, but localized builds write the system ANSI code page
-       (the bundled fdo59355-1.pub is Russian CP1251), so forcing CP1252
-       would corrupt those documents.  Pure ASCII is identical under every
-       candidate encoding: pin it explicitly instead of running the ICU
-       detector on a pool that is too short for it to be reliable.  Anything
-       with high bytes keeps going through the detector. */
+       over the English corpus, but localized builds write the system ANSI
+       code page (the bundled fdo59355-1.pub is Russian CP1251), so forcing
+       CP1252 would corrupt those documents.  Pure ASCII is identical under
+       every candidate encoding: pin it explicitly instead of running the
+       ICU detector on a pool that is too short for it to be reliable.
+       Anything with high bytes keeps going through the detector. */
     bool asciiOnly = true;
     for (size_t i = 0; i < m_doc.text.size() && asciiOnly; ++i)
       asciiOnly = (static_cast<unsigned char>(m_doc.text[i]) & 0x80) == 0;
@@ -382,49 +383,71 @@ private:
 
     const std::vector<std::string> blocks = splitBlocks(m_doc.text, '\x0c');
 
-    /* The shape side of the link is an ordinal (chapter 13 §13.14 and the
-       format notes): the k-th text object, ordered by the u16 at shape +0x46,
-       owns the k-th 0x0C block.  The 0xFFFF record is the master/default
-       frame and carries no text. */
-    std::vector<std::pair<uint16_t, unsigned> > shapes; // (text id, chunk id)
+    /* The shape side of the link is the u16 text id at shape +0x46: every
+       shape with text id i displays block i.  Repeated ids share the block
+       (one story flowed across several frames), so group the content shapes
+       by text id; the k-th group owns the k-th block.  Shapes with 0xFFFF
+       (the master/default frames) and the zero-box gallery defaults own no
+       block: the writer numbers only visible text, so leaving them in would
+       shift every later shape by one (chapter 10 §10.3.1, chapter 13
+       §13.14). */
+    std::map<uint16_t, std::vector<unsigned> > groups; // text id -> shape indices
     for (size_t i = 0; i < m_doc.shapes.size(); ++i)
     {
       const mspub::spec::Shape &s = m_doc.shapes[i];
-      if ((s.type == 0x0000 || s.type == 0x0001) && s.textId >= 0)
-        shapes.push_back(std::make_pair(uint16_t(s.textId), unsigned(i)));
+      if ((s.type == 0x0000 || s.type == 0x0001) && s.textId >= 0 &&
+          s.right > s.left && s.bottom > s.top)
+        groups[uint16_t(s.textId)].push_back(unsigned(i));
     }
-    std::stable_sort(shapes.begin(), shapes.end(),
-                     [](const std::pair<uint16_t, unsigned> &a,
-                        const std::pair<uint16_t, unsigned> &b)
-                     {
-                       return a.first < b.first;
-                     });
+    std::vector<uint16_t> order;
+    for (std::map<uint16_t, std::vector<unsigned> >::const_iterator it = groups.begin();
+         it != groups.end(); ++it)
+      order.push_back(it->first);
 
-    const size_t count = std::min(blocks.size(), shapes.size());
     for (size_t i = 0; i < blocks.size(); ++i)
     {
       const std::string block = normalizePoolBlock(blocks[i]);
       const mspub::spec::Shape *owner =
-        i < count ? &m_doc.shapes[shapes[i].second] : nullptr;
-
-      if (owner && isTableShape(*owner) &&
-          cellCount(block) == unsigned(owner->table.rows) * unsigned(owner->table.columns))
+        i < order.size() && !groups[order[i]].empty()
+        ? &m_doc.shapes[groups[order[i]].front()] : 0;
+      /* The table frame is found by its own geometry, not by position:
+         the block whose 0x0F cell count equals the frame's A·B is that
+         frame's grid (chapter 10 §10.3.1).  Every shape sharing the text
+         id gets the same block; only the frame with the matching grid is
+         emitted as a table. */
+      const mspub::spec::Shape *table = 0;
+      if (owner)
+      {
+        for (size_t k = 0; k < groups[order[i]].size(); ++k)
+        {
+          const mspub::spec::Shape &cand = m_doc.shapes[groups[order[i]][k]];
+          if (isTableShape(cand) &&
+              cellCount(block) == unsigned(cand.table.rows) * unsigned(cand.table.columns))
+          {
+            table = &cand;
+            break;
+          }
+        }
+      }
+      if (table)
       {
         std::vector<unsigned> cellEnds;
         m_collector.addTextString(makeParagraphs(block, asBytes, &cellEnds),
                                   static_cast<unsigned>(i));
-        if (cellEnds.size() == size_t(owner->table.rows) * owner->table.columns)
+        if (cellEnds.size() == size_t(table->table.rows) * table->table.columns)
         {
           m_collector.setTableCellTextEnds(static_cast<unsigned>(i), cellEnds);
-          m_collector.setShapeTableInfo(owner->id, makeTableInfo(*owner));
+          m_collector.setShapeTableInfo(table->id, makeTableInfo(*table));
         }
       }
       else
         m_collector.addTextString(makeParagraphs(block, asBytes),
                                   static_cast<unsigned>(i));
-
       if (owner)
-        m_textIdByShape[owner->id] = static_cast<unsigned>(i);
+      {
+        for (size_t k = 0; k < groups[order[i]].size(); ++k)
+          m_textIdByShape[m_doc.shapes[groups[order[i]][k]].id] = static_cast<unsigned>(i);
+      }
     }
   }
 
@@ -550,10 +573,11 @@ private:
     m_emitted.insert(s.id);
     m_collector.setShapePage(s.id, pageId);
 
-    /* 0x0003 carries a freeform outline: box-local EMU vertices counted at
-       +0x74 (chapter 06 §6.4).  Emit it as a custom path so the collector
+    /* 0x0002/0x0003 carry a freeform outline: box-local EMU vertices counted
+       at +0x74 (chapter 06 §6.4).  Emit it as a custom path so the collector
        draws the polygon instead of its bounding rectangle. */
-    const bool polygon = s.type == 0x0003 && s.vertices.size() >= 3 &&
+    const bool polygon = (s.type == 0x0002 || s.type == 0x0003) &&
+                         s.vertices.size() >= 3 &&
                          s.right > s.left && s.bottom > s.top;
     m_collector.setShapeType(s.id, polygon ? NOT_PRIMITIVE : shapeTypeForMarker(s.type));
     m_collector.setShapeCoordinatesInEmu(s.id, s.left, s.top, s.right, s.bottom);
@@ -579,6 +603,28 @@ private:
        same). */
     if (s.rotationDeg != 0.0 && s.type != 0x0004)
       m_collector.setShapeRotation(s.id, 360.0 - s.rotationDeg);
+
+    /* Flag word bit 0 is the shadow (§6.7.5): a fixed 1/16-inch down-right
+       offset tinted 50 % toward white from the pen colour.  No other flag
+       bit flips, frames or mirrors anything (§6.7.6), so only bit 0 is
+       emitted. */
+    if (s.flags & 0x0001)
+    {
+      uint32_t shadowRgb = 0;
+      if (resolveColor(s.lineColorRef, shadowRgb))
+      {
+        const int sr = int(shadowRgb & 0xff);
+        const int sg = int((shadowRgb >> 8) & 0xff);
+        const int sb = int((shadowRgb >> 16) & 0xff);
+        const uint32_t tinted =
+          uint32_t(uint8_t((12800 + sr * 50) / 100)) |
+          (uint32_t(uint8_t((12800 + sg * 50) / 100)) << 8) |
+          (uint32_t(uint8_t((12800 + sb * 50) / 100)) << 16);
+        m_collector.setShapeShadow(
+          s.id, Shadow(OFFSET, 57150, 57150, 0, 0, 0, 0, 1,
+                       ColorReference(tinted), ColorReference(tinted)));
+      }
+    }
 
     const unsigned width = lineWidthInEmu(s.lineWidthCode);
     uint32_t rgb = 0;

@@ -47,7 +47,7 @@ struct Vertex
 /** Row/column geometry of a 0x0001 frame (chapter 06 §6.4.1, chapter 10 §10.3.1). */
 struct TableGeometry
 {
-  uint16_t columns = 0;   // A, u16 at +0x4A
+  uint16_t columns = 0;   // A, u16 at +0x4A (95/97; +8 shift for 98, no tail there)
   uint16_t rows = 0;      // B, u16 at +0x50
   std::vector<uint32_t> columnWidthsEmu;  // nominal width c of each column record
   std::vector<uint32_t> rowHeightsEmu;    // nominal extent c of each row record
@@ -63,9 +63,13 @@ struct Shape
   int32_t left = 0, top = 0, right = 0, bottom = 0;  // EMU
 
   // Publisher 95/97/98 draw-time fields (chapter 06 section 6.7).  The 95/97
-  // layout and the Publisher 98 layout differ by the 8-byte insertion in
-  // +0x1C … +0x2A (chapter 06 §6.3), so these are decoded with an offset.
+  // layout and the Publisher 98 layout differ by the insertion in
+  // +0x1C … +0x2A (8 bytes, 24 for 0x0002/0x0003; chapter 06 §6.3),
+  // so these are decoded with an offset.
   uint16_t flags = 0;         // +0x16, common to both layouts (§6.7.6)
+  uint32_t colorRefA = 0;     // +0x18 colour reference A (§6.7.7)
+  uint32_t colorRefB = 0;     // +0x1C colour reference B, 0/1 = none (§6.7.7)
+  uint8_t selector = 0;       // +0x20 colour/object selector (§6.6)
   int textId = -1;            // u16 at +0x46 (0xFFFF = no text), 0x0000/0x0001
   uint8_t lineWidthCode = 0;  // u8 at +0x22
   uint32_t lineColorRef = 0;  // u32 at +0x23
