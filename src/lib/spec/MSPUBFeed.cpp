@@ -27,7 +27,9 @@
 #include "../Line.h"
 #include "../MSPUBCollector.h"
 #include "../MSPUBTypes.h"
+#include "../PolygonUtils.h"
 #include "../ShapeType.h"
+#include "../TableInfo.h"
 
 namespace libmspub
 {
@@ -141,15 +143,46 @@ std::vector<unsigned char> utf8ToUtf16Le(const std::string &in)
   return out;
 }
 
+/* Publisher 95/97 terminate every table cell with CR LF and then write the
+   0x0F cell separator (chapter 10 §10.3).  The CR LF already ends the cell's
+   paragraph, so leaving it in front of the separator would make 0x0F flush a
+   second, empty paragraph.  Strip that terminator, and the one after the
+   final separator, before splitting. */
+std::string normalizePoolBlock(const std::string &block)
+{
+  std::string out;
+  out.reserve(block.size());
+  size_t i = 0;
+  while (i < block.size())
+  {
+    if (block[i] == '\r' && i + 2 < block.size() &&
+        block[i + 1] == '\n' && block[i + 2] == '\x0f')
+    {
+      i += 2;
+      continue;
+    }
+    out.push_back(block[i++]);
+  }
+  if (out.size() >= 3 && out[out.size() - 3] == '\x0f' &&
+      out[out.size() - 2] == '\r' && out[out.size() - 1] == '\n')
+    out.resize(out.size() - 2);
+  return out;
+}
+
 /* Build paragraphs from one frame block.  0x0F separates table cells,
    CR/LF separates paragraphs, 0x0B is a soft line break and 0x05 is a
    page-number field (chapter 13 §13.14.1).  `convert` receives the raw
-   paragraph bytes and returns the bytes stored in the span. */
+   paragraph bytes and returns the bytes stored in the span.  When
+   `cellEnds` is given, it receives one cumulative character offset per cell
+   boundary in the form MSPUBCollector::setTableCellTextEnds() expects (the
+   collector starts counting at 1). */
 template <typename Converter>
-std::vector<TextParagraph> makeParagraphs(const std::string &block, Converter convert)
+std::vector<TextParagraph> makeParagraphs(const std::string &block, Converter convert,
+                                          std::vector<unsigned> *cellEnds = nullptr)
 {
   std::vector<TextParagraph> paragraphs;
   std::vector<unsigned char> current;
+  unsigned offset = 1;
   auto flush = [&]()
   {
     std::vector<TextSpan> spans;
@@ -169,13 +202,23 @@ std::vector<TextParagraph> makeParagraphs(const std::string &block, Converter co
     else if (ch == '\n')
       flush();
     else if (ch == 0x0f) // table-cell separator
+    {
       flush();
+      if (cellEnds)
+        cellEnds->push_back(offset);
+    }
     else if (ch == 0x0b) // soft line break
+    {
       current.push_back('\n');
+      ++offset;
+    }
     else if (ch == 0x05) // page-number field
       continue;
     else
+    {
       current.push_back(ch);
+      ++offset;
+    }
   }
   /* The final field after a trailing separator is not a cell/paragraph. */
   if (!current.empty() || paragraphs.empty())
@@ -191,6 +234,41 @@ std::vector<unsigned char> asBytes(const std::vector<unsigned char> &in)
 std::string toString(const std::vector<unsigned char> &in)
 {
   return std::string(in.begin(), in.end());
+}
+
+/* A 0x0001 frame is a table when the record carries the A/B counts and the
+   full 14-byte record arrays (chapter 06 §6.4.1). */
+bool isTableShape(const mspub::spec::Shape &s)
+{
+  return s.type == 0x0001 && s.table.columns > 0 && s.table.rows > 0 &&
+         s.table.columnWidthsEmu.size() == s.table.columns &&
+         s.table.rowHeightsEmu.size() == s.table.rows;
+}
+
+unsigned cellCount(const std::string &block)
+{
+  return static_cast<unsigned>(std::count(block.begin(), block.end(), '\x0f'));
+}
+
+/* A table has no record type of its own: the grid is the A/B counts of the
+   owning 0x0001 frame and the cells are the 0x0F-separated runs of its text
+   block (chapter 10 §10.2/§10.3).  Cells are stored row-major and the format
+   has no merged cells (chapter 10 §10.4), so every cell is 1x1. */
+TableInfo makeTableInfo(const mspub::spec::Shape &s)
+{
+  TableInfo ti(s.table.rows, s.table.columns);
+  ti.m_columnWidthsInEmu.assign(s.table.columnWidthsEmu.begin(),
+                                s.table.columnWidthsEmu.end());
+  ti.m_rowHeightsInEmu.assign(s.table.rowHeightsEmu.begin(),
+                              s.table.rowHeightsEmu.end());
+  for (unsigned k = 0; k < unsigned(s.table.rows) * unsigned(s.table.columns); ++k)
+  {
+    CellInfo cell;
+    cell.m_startRow = cell.m_endRow = k / s.table.columns;
+    cell.m_startColumn = cell.m_endColumn = k % s.table.columns;
+    ti.m_cells.push_back(cell);
+  }
+  return ti;
 }
 
 /* ---------------------------------------------------------------- feed ---- */
@@ -287,14 +365,22 @@ private:
     if (m_doc.text.empty())
       return;
 
-    /* Publisher 95/97 text is CP1252; the collector's encoding heuristic is
-       the same one MSPUBParser97 uses. */
-    m_collector.useEncodingHeuristic();
+    /* The pool carries no code page.  Chapter 13 §13.14.1 measures CP1252
+       for the corpus, but localized builds write the system ANSI code page
+       (the bundled fdo59355-1.pub is Russian CP1251), so forcing CP1252
+       would corrupt those documents.  Pure ASCII is identical under every
+       candidate encoding: pin it explicitly instead of running the ICU
+       detector on a pool that is too short for it to be reliable.  Anything
+       with high bytes keeps going through the detector. */
+    bool asciiOnly = true;
+    for (size_t i = 0; i < m_doc.text.size() && asciiOnly; ++i)
+      asciiOnly = (static_cast<unsigned char>(m_doc.text[i]) & 0x80) == 0;
+    if (asciiOnly)
+      m_collector.setTextEncoding("windows-1252");
+    else
+      m_collector.useEncodingHeuristic();
 
     const std::vector<std::string> blocks = splitBlocks(m_doc.text, '\x0c');
-    for (size_t i = 0; i < blocks.size(); ++i)
-      m_collector.addTextString(makeParagraphs(blocks[i], asBytes),
-                                static_cast<unsigned>(i));
 
     /* The shape side of the link is an ordinal (chapter 13 §13.14 and the
        format notes): the k-th text object, ordered by the u16 at shape +0x46,
@@ -315,8 +401,31 @@ private:
                      });
 
     const size_t count = std::min(blocks.size(), shapes.size());
-    for (size_t i = 0; i < count; ++i)
-      m_textIdByShape[m_doc.shapes[shapes[i].second].id] = unsigned(i);
+    for (size_t i = 0; i < blocks.size(); ++i)
+    {
+      const std::string block = normalizePoolBlock(blocks[i]);
+      const mspub::spec::Shape *owner =
+        i < count ? &m_doc.shapes[shapes[i].second] : nullptr;
+
+      if (owner && isTableShape(*owner) &&
+          cellCount(block) == unsigned(owner->table.rows) * unsigned(owner->table.columns))
+      {
+        std::vector<unsigned> cellEnds;
+        m_collector.addTextString(makeParagraphs(block, asBytes, &cellEnds),
+                                  static_cast<unsigned>(i));
+        if (cellEnds.size() == size_t(owner->table.rows) * owner->table.columns)
+        {
+          m_collector.setTableCellTextEnds(static_cast<unsigned>(i), cellEnds);
+          m_collector.setShapeTableInfo(owner->id, makeTableInfo(*owner));
+        }
+      }
+      else
+        m_collector.addTextString(makeParagraphs(block, asBytes),
+                                  static_cast<unsigned>(i));
+
+      if (owner)
+        m_textIdByShape[owner->id] = static_cast<unsigned>(i);
+    }
   }
 
   /* ------------------------------------------------- text: Publisher 98 */
@@ -377,6 +486,9 @@ private:
     {
       if (!m_collector.addPage(page.id))
         continue;
+      /* A page in the model exists even when it has no shapes: say so, or
+         the collector drops it from the drawing. */
+      m_collector.setPageHasContent(page.id);
       m_collector.setNextPage(page.id);
       for (size_t i = 0; i < page.children.size(); ++i)
         emitChild(page.children[i], page.id);
@@ -437,8 +549,28 @@ private:
   {
     m_emitted.insert(s.id);
     m_collector.setShapePage(s.id, pageId);
-    m_collector.setShapeType(s.id, shapeTypeForMarker(s.type));
+
+    /* 0x0003 carries a freeform outline: box-local EMU vertices counted at
+       +0x74 (chapter 06 §6.4).  Emit it as a custom path so the collector
+       draws the polygon instead of its bounding rectangle. */
+    const bool polygon = s.type == 0x0003 && s.vertices.size() >= 3 &&
+                         s.right > s.left && s.bottom > s.top;
+    m_collector.setShapeType(s.id, polygon ? NOT_PRIMITIVE : shapeTypeForMarker(s.type));
     m_collector.setShapeCoordinatesInEmu(s.id, s.left, s.top, s.right, s.bottom);
+
+    if (polygon)
+    {
+      DynamicCustomShape shape(unsigned(s.right - s.left), unsigned(s.bottom - s.top));
+      shape.m_vertices.reserve(s.vertices.size());
+      for (const mspub::spec::Vertex &v : s.vertices)
+      {
+        Vertex out;
+        out.m_x = v.x;
+        out.m_y = v.y;
+        shape.m_vertices.push_back(out);
+      }
+      m_collector.setShapeCustomPath(s.id, shape);
+    }
 
     /* The model stores tenths of a degree, counter-clockwise (§6.2).  The
        collector's transform treats a positive angle as clockwise on the

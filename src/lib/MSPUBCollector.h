@@ -58,6 +58,11 @@ public:
   void collectMetaData(const librevenge::RVNGPropertyList &metaData);
 
   bool addPage(unsigned seqNum);
+  /** Mark a page as present in the document even when it carries no shape.
+      writePage() only paints pages with content, so a caller that knows the
+      page exists (from the document structure, not from its children) must
+      say so before go(). */
+  void setPageHasContent(unsigned pageSeqNum);
   bool addTextString(const std::vector<TextParagraph> &str, unsigned id);
   void addTextShape(unsigned stringId, unsigned seqNum);
   bool addImage(unsigned index, ImgType type, librevenge::RVNGBinaryData img);
@@ -120,6 +125,10 @@ public:
   bool setCurrentGroupSeqNum(unsigned seqNum);
 
   void useEncodingHeuristic();
+  /** Force the encoding used to decode the bytes handed to addTextString().
+      The pointer must outlive the collector and its go() call; use a string
+      literal or a static buffer.  Overrides useEncodingHeuristic(). */
+  void setTextEncoding(const char *encoding);
 
   void setTableCellTextEnds(unsigned textId, const std::vector<unsigned> &ends);
   void setTextStringOffset(unsigned textId, unsigned offset);
@@ -132,7 +141,8 @@ private:
   struct PageInfo
   {
     std::vector<std::shared_ptr<ShapeGroupElement>> m_shapeGroupsOrdered;
-    PageInfo() : m_shapeGroupsOrdered() { }
+    bool m_emitWhenEmpty;
+    PageInfo() : m_shapeGroupsOrdered(), m_emitWhenEmpty(false) { }
   };
 
   MSPUBCollector(const MSPUBCollector &);

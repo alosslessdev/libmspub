@@ -17,10 +17,10 @@ embedded-object references.
 
 | File | Contents |
 |---|---|
-| `MSPUBSpec.h` | document model: chunks, pages, shapes, stories, images, palettes, object references, cell blocks |
+| `MSPUBSpec.h` | document model: chunks, pages, shapes (with freeform vertices and table geometry), stories, images, palettes, object references, cell blocks |
 | `MSPUBSpec.cpp` | CFB v3 reader (FAT, mini-FAT, mini stream), `Contents` header, chunk directory, per-type records, text store, Quill, colour references, JSON |
 | `MSPUBExplore.cpp` | `pubexplore` CLI: dump a document as JSON, optionally carve every embedded WMF |
-| `MSPUBFeed.h/.cpp` | translates the model into `MSPUBCollector` calls (pages, z-ordered shapes and groups, geometry/rotation, text, images, palette) |
+| `MSPUBFeed.h/.cpp` | translates the model into `MSPUBCollector` calls (pages, z-ordered shapes and groups, geometry/rotation, polygons, tables, text, images, palette) |
 
 Implemented per spec chapter:
 
@@ -34,13 +34,17 @@ Implemented per spec chapter:
   the 95/97 layout *and* the 98 layout (+4 shift, descriptor `0x1E`), including
   page slots of type `0x41`.
 * **06/07** shape and group geometry: rotation in 1/10 degree, signed EMU
-  bounding box, group child lists in both layouts.
+  bounding box, group child lists in both layouts; the draw-time field map
+  (flag word `+0x16`, pen `+0x21`…`+0x27`, frame descriptor) with the
+  Publisher 98 `+8` insertion; the `0x0003` vertex array (count at `+0x74`,
+  stride word `+0x78`, `{i32 x, i32 y}` from `+0x7E`, box-local EMU) and the
+  `0x0001` `A`/`B` counts at `+0x4A`/`+0x50` with their 14-byte records.
 * **08** `IMAGE_DATA`: length-prefixed WMF, carved out as-is.
 * **09** PALETTE (`0x0047`): UTF-16LE scheme name and eight colour references,
   plus the colour-reference decoder (palette index, literal RGB, automatic).
 * **10/13** Publisher 95/97 text store: character array, story records
   (`0x001D`, `size == 0x1A + 6n`), and table cells (`0x0C` blocks split on
-  `0x0F`).
+  `0x0F`, dropping the trailing paragraph-break field that is not a cell).
 * **13** Quill stream (`Quill/QuillSub/CONTENTS`): chunk-reference chain and
   UTF-16LE `TEXT`.
 * **15** embedded objects: `Objects/Object N` storages and the `0x0022`
@@ -76,50 +80,82 @@ autotools setup against librevenge, boost and ICU.
 
 `MSPUBFeed.cpp` now drives `MSPUBCollector` from the model:
 
-* **Dispatch** — `MSPUBDocument::parse` builds the model for every `0x22`
-  document and uses the feed when there is no `Quill` stream (Publisher
-  95/97) or when `Contents[0x0C] == 616` (Publisher 98).  Documents with a
-  Quill stream and any other header tag keep the 2000+ parser, and the
-  `0x2C` path is untouched.  Both `0xACE8` and `0xACE7` are accepted.
+* **Dispatch** — `MSPUBDocument::parse` reads the whole OLE2 file once and
+  builds the model for every `0x22` document, then uses the feed when there is
+  no `Quill` stream (Publisher 95/97) or when `Contents[0x0C] == 616`
+  (Publisher 98).  Documents with a Quill stream and any other header tag keep
+  the 2000+ parser, and the `0x2C` path is untouched.  Both `0xACE8` and
+  `0xACE7` are accepted.
 * **Structure** — pages in document order with their z-order child lists;
-  groups via `beginGroup`/`setCurrentGroupSeqNum`/`endGroup`; shapes with
-  `setShapeType`, `setShapeCoordinatesInEmu`, `setShapeRotation` (the model's
+  every page of the model is declared with `setPageHasContent`, so pages
+  without shapes still produce a `startPage`/`endPage` pair; groups via
+  `beginGroup`/`setCurrentGroupSeqNum`/`endGroup`; shapes with `setShapeType`,
+  `setShapeCoordinatesInEmu`, `setShapeRotation` (the model's
   counter-clockwise tenths converted into the collector's screen-positive
-  angle), `setShapePage` and `setShapeOrder`.
-* **Text** — Publisher 95/97: the CP1252 character array split into `0x0C`
-  frame blocks and `0x0F` table cells; the block ordinal is assigned to the
-  text-bearing `0x0000`/`0x0001` shapes ordered by their `u16@+0x46` text id
-  (the only shape-side link the format carries, chapter 13).  Publisher 98:
+  angle), `setShapePage` and `setShapeOrder`.  A `0x0003` freeform outline is
+  emitted as a `DynamicCustomShape` (box-local EMU vertices, `NOT_PRIMITIVE`),
+  which makes the collector draw the polygon instead of its bounding box.
+* **Text** — Publisher 95/97: the character array split into `0x0C` frame
+  blocks; the block ordinal is assigned to the text-bearing `0x0000`/`0x0001`
+  shapes ordered by their `u16@+0x46` text id (the only shape-side link the
+  format carries, chapter 13).  A block whose `0x0F` cell count equals the
+  `A·B` of its `0x0001` frame is emitted as a real table: one paragraph per
+  cell, `setTableCellTextEnds` with the cumulative character offsets and
+  `setShapeTableInfo` with the row/column extents from the 14-byte records.
+  The format has no table record (chapter 10 §10.1) — the grid was always the
+  frame's `A`/`B` counts, so `TableInfo` expresses it exactly.  Publisher 98:
   the Quill `TEXT` array (UTF-8 from the model, converted to UTF-16LE for the
   collector), attached to the `0x0008` text frames.
+* **Encoding** — a pure-ASCII legacy pool is pinned to `windows-1252` with
+  `setTextEncoding`; pools with high bytes keep the collector's ICU detector,
+  because the format stores no code page (chapter 13 §13.14.1 measures CP1252
+  only over the English corpus).
 * **Images** — each `0x0021` payload is passed to `addImage(..., WMF, ...)`
   and bound to its owner (`0x0002`/`0x0003`, or the shape that owns a `0x0027`
   picture object).
 * **Palette** — the eight `0x0047` references are resolved through the colour
   decoder (56-entry static table, literal RGB, automatic) and added with
   `addPaletteColor`.
-* **Fill and line** — for the Publisher 95/97 record layout the model exposes
-  the `+0x23` pen and `+0x2E` fill references and the `+0x22` width code;
-  the feed emits `addShapeLine`/`setShapeFill`.
+* **Fill and line** — the model exposes the `+0x23` pen, the `+0x22` width
+  code and (95/97 only) the `+0x2E` fill; the feed emits
+  `addShapeLine`/`setShapeFill`.  For `headerTag == 616` the pen is read at
+  the documented `+8` shift (`+0x2A` width, `+0x2B` colour).
+
 
 `docs/INTEGRATION.md` expands these with the exact offsets and the conditions
 under which each applies.
 
 ### Remaining gaps
 
-* The collector writes a page only when it has at least one shape, so empty
-  pages are still omitted from the drawing.
+* **Flips are not emitted.** Chapter 06 §6.7.6 accounts for every bit of the
+  shape flag word (`+0x16`) and none of them flips anything: bit 0 is the
+  shadow, bits 3/4 the frame pair, bits 8–13 interpretation and group-child
+  flags. The only mirror-like data in the family is the per-edge tag byte of
+  the geometry quad (the high byte of each `i32` at `+0x06`/`+0x0A`/`+0x0E`/
+  `+0x12`), which the field notes leave `[OPEN]`; the specification does not
+  define it, so no `setShapeFlip` value can be derived without guessing.
+* Publisher 98's *fill* colour is not emitted. The 95/97 slot is `+0x2E`; its
+  `+8`-shifted candidate (`+0x36`) holds one constant value in every record of
+  the Publisher 98 corpus, which cannot be a per-shape fill, and chapter 06
+  §6.9 still lists the inserted run as `[UNKNOWN]`. The line width (`+0x2A`)
+  and line colour (`+0x2B`) are read at the shifted offsets the chapter names.
 * Publisher 98's Quill stream does not persist a text-object → shape link
   (chapter 13 §13.16); when the block and frame counts differ the whole `TEXT`
   array is attached to the first `0x0008` frame.
-* Publisher 98 shapes are emitted with geometry only; their shifted fill/line
-  fields (`B + 8`) are not decoded.
-* Table cells are emitted as paragraphs; the `0x0001` row/column tail is not
-  yet turned into `TableInfo`.
-* Polygon outlines (the `0x0002`/`0x0003` vertex tail), flips and embedded
-  objects are not emitted.
+* The `0x0002` image-bearing shape's counted tail (chapter 06 §6.4) is not
+  decoded: only 2 of its 1 016 instances are longer than the fixed record and
+  the meaning of those 56 bytes is `[UNKNOWN]`. The `0x0003` tail is decoded
+  and emitted as a custom polygon path.
+* The freeform fill/line block (`+0x4E … +0x73` of `0x0003`) is undecoded in
+  the specification, so polygons render only when the shared `+0x22`/`+0x23`
+  line fields are set.
 * Page margins are not part of the 95/97/98 record set, so only the document
   page size is handed to the collector.
+* The legacy text pool carries no code page. Pure ASCII pools get an explicit
+  `windows-1252` hint; pools with high bytes still go through the collector's
+  ICU detector, because forcing `windows-1252` would corrupt the CP1251
+  documents (`src/test/data/fdo59355-1.pub` is Russian).
+
 
 ## License
 

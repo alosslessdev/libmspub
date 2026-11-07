@@ -516,6 +516,13 @@ void MSPUBCollector::useEncodingHeuristic()
   m_encodingHeuristic = true;
 }
 
+void MSPUBCollector::setTextEncoding(const char *encoding)
+{
+  m_encodingHeuristic = false;
+  m_calculatedEncoding = encoding;
+  m_allText.clear();
+}
+
 void MSPUBCollector::setShapeShadow(unsigned seqNum, const Shadow &shadow)
 {
   m_shapeInfosBySeqNum[seqNum].m_shadow = shadow;
@@ -1509,6 +1516,16 @@ bool MSPUBCollector::addPage(unsigned seqNum)
   return true;
 }
 
+void MSPUBCollector::setPageHasContent(unsigned pageSeqNum)
+{
+  auto it = m_pagesBySeqNum.find(pageSeqNum);
+  if (it == m_pagesBySeqNum.end())
+  {
+    return;
+  }
+  it->second.m_emitWhenEmpty = true;
+}
+
 void MSPUBCollector::addTextShape(unsigned stringId, unsigned seqNum)
 {
   m_shapeInfosBySeqNum[seqNum].m_textId = stringId;
@@ -1783,7 +1800,7 @@ void MSPUBCollector::writePage(unsigned pageSeqNum) const
     pageProps.insert("svg:height", m_height);
   }
   const auto &shapeGroupsOrdered = pageInfo.m_shapeGroupsOrdered;
-  if (!shapeGroupsOrdered.empty())
+  if (!shapeGroupsOrdered.empty() || pageInfo.m_emitWhenEmpty)
   {
     m_painter->startPage(pageProps);
     boost::optional<unsigned> masterSeqNum = getMasterPageSeqNum(pageSeqNum);

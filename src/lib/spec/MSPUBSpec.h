@@ -37,6 +37,22 @@ struct Chunk
   uint32_t size = 0;
 };
 
+/** One box-local vertex of a freeform outline (chapter 06 §6.4). */
+struct Vertex
+{
+  int32_t x = 0;
+  int32_t y = 0;
+};
+
+/** Row/column geometry of a 0x0001 frame (chapter 06 §6.4.1, chapter 10 §10.3.1). */
+struct TableGeometry
+{
+  uint16_t columns = 0;   // A, u16 at +0x4A
+  uint16_t rows = 0;      // B, u16 at +0x50
+  std::vector<uint32_t> columnWidthsEmu;  // nominal width c of each column record
+  std::vector<uint32_t> rowHeightsEmu;    // nominal extent c of each row record
+};
+
 /** A shape record with the four geometry fields (chapter 06). */
 struct Shape
 {
@@ -46,13 +62,20 @@ struct Shape
   double rotationDeg = 0.0;   // stored 1/10 degree, counter-clockwise
   int32_t left = 0, top = 0, right = 0, bottom = 0;  // EMU
 
-  // Publisher 95/97 draw-time fields (chapter 06 section 6.7).  These are
-  // only meaningful when the record uses the 95/97 descriptor gate; for the
-  // Publisher 98 layout the fields move and are left at their defaults.
+  // Publisher 95/97/98 draw-time fields (chapter 06 section 6.7).  The 95/97
+  // layout and the Publisher 98 layout differ by the 8-byte insertion in
+  // +0x1C … +0x2A (chapter 06 §6.3), so these are decoded with an offset.
+  uint16_t flags = 0;         // +0x16, common to both layouts (§6.7.6)
   int textId = -1;            // u16 at +0x46 (0xFFFF = no text), 0x0000/0x0001
   uint8_t lineWidthCode = 0;  // u8 at +0x22
   uint32_t lineColorRef = 0;  // u32 at +0x23
   uint32_t fillColorRef = 0;  // u32 at +0x2E (0x0005 only)
+
+  // 0x0003 freeform outline: counted tail at +0x74/+0x78/+0x7E (95/97 only).
+  std::vector<Vertex> vertices;
+
+  // 0x0001 frame: the A/B counts and their 14-byte records (95/97 only).
+  TableGeometry table;
 };
 
 /** A group record (chapter 07): z-ordered child chunk ids. */

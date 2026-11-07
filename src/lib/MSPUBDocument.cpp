@@ -157,13 +157,13 @@ PUBAPI bool MSPUBDocument::parse(librevenge::RVNGInputStream *input, librevenge:
       /* Publisher 95/97 keep their text inside Contents and Publisher 98
          uses the shifted records; the legacy parsers lose the former and
          mis-read the latter.  Feed the from-specification model for those
-         documents and keep the 2000+ Quill path untouched. */
-      std::unique_ptr<librevenge::RVNGInputStream> contentsStream(
-        input->getSubStreamByName("Contents"));
-      std::vector<unsigned char> contentsBytes;
-      if (contentsStream && readAll(contentsStream.get(), contentsBytes))
+         documents and keep the 2000+ Quill path untouched.
+         The model needs the whole OLE2 file: it reads Contents, the Quill
+         stream and the object storages itself. */
+      std::vector<unsigned char> fileBytes;
+      if (readAll(input, fileBytes))
       {
-        mspub::spec::Document doc = mspub::spec::parse(contentsBytes);
+        mspub::spec::Document doc = mspub::spec::parse(fileBytes);
         if (doc.ok && (!doc.hasQuill || doc.headerTag == 616) &&
             feedDocument(doc, collector))
         {

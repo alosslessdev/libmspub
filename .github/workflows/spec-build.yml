@@ -38,4 +38,7 @@ jobs:
           ./src/conv/raw/pub2raw src/test/data/fdo59355-1.pub > /tmp/out.raw
           test -s /tmp/out.raw
           grep -q 'startPage' /tmp/out.raw
+          # fdo59355-1.pub is a five-page document whose pages 2, 3 and 5 have
+          # no shapes: every page must still reach the painter.
+          test "$(grep -c 'startPage' /tmp/out.raw)" -eq 5
           grep -q 'insertText (' /tmp/out.raw

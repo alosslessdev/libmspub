@@ -528,27 +528,79 @@ Document parse(const std::vector<uint8_t> &file)
     s.right = s32(base + 0x0e);
     s.bottom = s32(base + 0x12);
 
-    /* The draw-time fields are only mapped for the 95/97 record layout; the
-       descriptor byte B is the per-marker constant (chapter 06 §6.3).  The
-       Publisher 98 records carry B+8 and are deliberately left alone. */
+    /* The draw-time fields sit at different offsets in the 95/97 and the
+       Publisher 98 record layouts: the 98 writer inserts 8 bytes in
+       +0x1C … +0x2A (chapter 06 §6.3), so every field behind that insertion
+       moves by +8.  Which fields are present is still gated by the
+       per-marker descriptor byte B (chapter 06 §6.3). */
     const uint8_t b = c.size > 3 ? base[3] : 0;
     const bool legacy = b == 0x5c || b == 0x60 || b == 0x74 || b == 0x3b ||
                         b == 0x3e || b == 0x35 || b == 0x29;
-    if (legacy)
+    const bool p98 = doc.headerTag == 616;
+    const size_t shift = p98 ? 8 : 0;
+    if (legacy || p98)
     {
-      if (c.size >= 0x27)
+      if (c.size >= 0x18)
+        s.flags = u16(base + 0x16);
+      if (c.size >= 0x27 + shift)
       {
-        s.lineWidthCode = base[0x22];
-        s.lineColorRef = u32(base + 0x23);
+        s.lineWidthCode = base[0x22 + shift];
+        s.lineColorRef = u32(base + 0x23 + shift);
       }
-      if (c.type == 0x0005 && c.size >= 0x32)
-        s.fillColorRef = u32(base + 0x2e);
-      if ((c.type == 0x0000 || c.type == 0x0001) && c.size >= 0x48)
+      if (c.type == 0x0005 && c.size >= 0x32 + shift)
       {
-        const uint16_t textId = u16(base + 0x46);
+        /* The 95/97 fill slot is +0x2E.  The Publisher 98 record has no
+           documented fill slot: the +8-shifted +0x36 holds one constant value
+           in every record of the corpus, and chapter 06 §6.9 still lists the
+           inserted run as unknown, so a fill is only emitted for 95/97. */
+        if (!p98)
+          s.fillColorRef = u32(base + 0x2e);
+      }
+      if ((c.type == 0x0000 || c.type == 0x0001) && c.size >= 0x48 + shift)
+      {
+        const uint16_t textId = u16(base + 0x46 + shift);
         s.textId = textId == 0xffff ? -1 : int(textId);
       }
     }
+
+    /* 0x0003 freeform outline: counted array of box-local {i32 x, i32 y}
+       vertices, count at +0x74, stride word (8) at +0x78, array at +0x7E
+       (chapter 06 §6.4).  Only the 95/97 layout is decoded; the Publisher 98
+       record grows by 24 bytes and its tail is not proven (§6.3). */
+    if (!p98 && c.type == 0x0003 && c.size >= 0x7e)
+    {
+      const uint16_t n = u16(base + 0x74);
+      const uint16_t stride = u16(base + 0x78);
+      if (n > 0 && stride == 8 && c.size >= 0x7e + 8 * size_t(n))
+      {
+        for (uint16_t k = 0; k < n; ++k)
+        {
+          Vertex v;
+          v.x = s32(base + 0x7e + 8 * size_t(k));
+          v.y = s32(base + 0x7e + 8 * size_t(k) + 4);
+          s.vertices.push_back(v);
+        }
+      }
+    }
+
+    /* 0x0001 frame: A column records and B row records of 14 bytes from
+       +0x6A; the counts sit at +0x4A and +0x50 (chapter 06 §6.4.1). */
+    if (!p98 && c.type == 0x0001 && c.size >= 0x6a)
+    {
+      const uint16_t a = u16(base + 0x4a);
+      const uint16_t rows = u16(base + 0x50);
+      if (a > 0 && rows > 0 &&
+          c.size >= 0x6a + 14 * (size_t(a) + size_t(rows)))
+      {
+        s.table.columns = a;
+        s.table.rows = rows;
+        for (uint16_t k = 0; k < a; ++k)
+          s.table.columnWidthsEmu.push_back(u32(base + 0x6a + 14 * size_t(k) + 8));
+        for (uint16_t k = 0; k < rows; ++k)
+          s.table.rowHeightsEmu.push_back(u32(base + 0x6a + 14 * (size_t(a) + k) + 8));
+      }
+    }
+
     doc.shapes.push_back(s);
   }
 
@@ -653,6 +705,9 @@ Document parse(const std::vector<uint8_t> &file)
       }
       if (cells.size() >= 4)
       {
+        /* The last field after the final 0x0F is the paragraph break that
+           follows the separator, not a cell (chapter 10 §10.3). */
+        cells.pop_back();
         CellBlock cb;
         cb.blockIndex = block;
         cb.cells = cells.size();
@@ -827,6 +882,19 @@ std::string toJson(const Document &doc)
   o << "  \"chunks\": " << doc.chunks.size() << ",\n";
   o << "  \"pages\": " << doc.pages.size() << ",\n";
   o << "  \"shapes\": " << doc.shapes.size() << ",\n";
+  {
+    size_t polygonShapes = 0;
+    size_t tableShapes = 0;
+    for (const Shape &s : doc.shapes)
+    {
+      if (!s.vertices.empty())
+        ++polygonShapes;
+      if (s.table.columns && s.table.rows)
+        ++tableShapes;
+    }
+    o << "  \"polygonShapes\": " << polygonShapes << ",\n";
+    o << "  \"tableShapes\": " << tableShapes << ",\n";
+  }
   o << "  \"groups\": " << doc.groups.size() << ",\n";
   o << "  \"images\": " << doc.images.size() << ",\n";
   o << "  \"objects\": " << doc.objects.size() << ",\n";
