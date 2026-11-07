@@ -13,6 +13,8 @@ jobs:
             -o pubexplore src/lib/spec/MSPUBSpec.cpp src/lib/spec/MSPUBExplore.cpp
       - name: CLI smoke test
         run: ./pubexplore --help
+      - name: Parse the bundled Publisher 95 sample
+        run: ./pubexplore src/test/data/fdo59355-1.pub > /dev/null
       - name: Grammar compiles
         if: ${{ hashFiles('kaitai/mspub_contents.ksy') != '' }}
         run: echo "grammar lives in the specification repository"
