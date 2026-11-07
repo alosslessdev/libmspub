@@ -34,4 +34,6 @@ jobs:
           ./configure
           make -j"$(nproc)"
       - name: Import the bundled Publisher 95 sample through the collector
-        run: ./src/conv/raw/pub2raw src/test/data/fdo59355-1.pub > /dev/null
+        run: |
+          ./src/conv/raw/pub2raw src/test/data/fdo59355-1.pub > /tmp/out.raw
+          test -s /tmp/out.raw
