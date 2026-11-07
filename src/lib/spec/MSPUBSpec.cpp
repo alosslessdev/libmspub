@@ -738,25 +738,54 @@ bool decodeColorRef(uint32_t ref, uint8_t &r, uint8_t &g, uint8_t &b)
   };
   const uint8_t tag = uint8_t((ref >> 24) & 0xFF);
   const unsigned top = tag >> 5;
-  if (top == 0 || top == 6)
+
+  const auto paletteEntry = [&](uint32_t index, uint8_t &er, uint8_t &eg, uint8_t &eb) -> bool
   {
-    /* Palette index (top 0), or the brightness-modified palette entry
-       (top 6, whose low word is also an index).  Resolve the index through
-       the static table; brightness modulation is not applied here. */
-    const uint32_t index = ref & 0xFFFF;
     if (index >= 56)
       return false;
     const uint32_t entry = table[index];
-    r = uint8_t(entry & 0xFF);
-    g = uint8_t((entry >> 8) & 0xFF);
-    b = uint8_t((entry >> 16) & 0xFF);
+    er = uint8_t(entry & 0xFF);
+    eg = uint8_t((entry >> 8) & 0xFF);
+    eb = uint8_t((entry >> 16) & 0xFF);
     return true;
-  }
+  };
+  const auto brightness = [](uint8_t cr, uint8_t cg, uint8_t cb, bool towardWhite,
+                             unsigned percent, uint8_t &br, uint8_t &bg, uint8_t &bb)
+  {
+    if (percent == 100)
+    {
+      br = cr;
+      bg = cg;
+      bb = cb;
+      return;
+    }
+    if (percent == 0)
+    {
+      br = bg = bb = towardWhite ? 0xff : 0x00;
+      return;
+    }
+    const int k = towardWhite ? 25550 - 255 * int(percent) : 50;
+    br = uint8_t((k + int(cr) * int(percent)) / 100);
+    bg = uint8_t((k + int(cg) * int(percent)) / 100);
+    bb = uint8_t((k + int(cb) * int(percent)) / 100);
+  };
+
+  if (top == 0)
+    return paletteEntry(ref & 0xFFFF, r, g, b);
   if (top == 1)
   {
     r = uint8_t(ref & 0xFF);
     g = uint8_t((ref >> 8) & 0xFF);
     b = uint8_t((ref >> 16) & 0xFF);
+    return true;
+  }
+  if (top == 4)
+  {
+    /* Brightness-modified reference: resolve the inner reference and blend. */
+    uint8_t ir = 0, ig = 0, ib = 0;
+    if (!decodeColorRef(ref & 0x00FFFFFF, ir, ig, ib))
+      return false;
+    brightness(ir, ig, ib, (ref >> 23) & 1, tag & 0x7F, r, g, b);
     return true;
   }
   if (top == 5 && (ref & 0xFFFF) == 0)
@@ -766,8 +795,17 @@ bool decodeColorRef(uint32_t ref, uint8_t &r, uint8_t &g, uint8_t &b)
     b = 0x73;
     return true;
   }
-  /* Derived colour spaces (tags 0b010 / 0b100) need tables the model does
-     not carry; report failure rather than inventing a colour. */
+  if (top == 6)
+  {
+    /* Brightness-modified palette entry. */
+    uint8_t ir = 0, ig = 0, ib = 0;
+    if (!paletteEntry(ref & 0xFFFF, ir, ig, ib))
+      return false;
+    brightness(ir, ig, ib, (ref >> 23) & 1, tag & 0x7F, r, g, b);
+    return true;
+  }
+  /* The derived-space table for tag 0b010 is not in the model; report
+     failure rather than inventing a colour. */
   return false;
 }
 
